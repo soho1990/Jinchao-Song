@@ -1,0 +1,1407 @@
+// 主函数入口
+
+//------------------------------------------------------------------------------
+int _tmain(int argc, _TCHAR* argv[])
+{
+	//--------------------------------------------------------------------------
+	GDALAllRegister();
+	OGRRegisterAll();
+	CPLSetConfigOption("GDAL_FILENAME_IS_UTF8","NO");
+	CPLSetConfigOption("SHAPE_ENCODING","");
+
+	int EXIT_CODE = EXIT_FAILURE;
+
+	EXIT_CODE = _recognitionForENVI(argc, argv);
+
+	return EXIT_CODE;
+}
+
+//--------------------------------------------------------------------------
+void getFolderShapeFile(std::string path,std::vector<std::string>& vFiles);
+
+bool CopyShapeFile(const std::string& szSrcFolder,const std::vector<std::string>& vShpFiles,const std::string& szDstFolder);
+
+//------------------------------------------------------------------------------
+bool CopyShapeFile(const std::string& szSrcFile, const std::string& szDstFile);
+
+
+//--------------------------------------------------------------------------
+void getFolderShapeFile(std::string path,std::vector<std::string>& vFiles)
+{
+	if (path.at(path.size()-1) != '\\' ) {
+		path += "\\";
+	}
+	std::string st = path;
+	st += "*.shp";
+	const char* p = st.c_str();
+
+	_finddata_t file;
+	int k;
+	long HANDLE;
+	k = HANDLE = _findfirst(p, &file );
+	while( k != -1 )
+	{
+		std::string szTitle(file.name);
+		if (szTitle.substr(szTitle.length()-3,szTitle.length()) == "shp")
+		{
+			vFiles.push_back(szTitle);
+		}
+
+		k = _findnext( HANDLE, &file );
+	}
+	_findclose( HANDLE );
+}
+
+
+
+//------------------------------------------------------------------------------
+bool CopyShapeFile(const std::string& szSrcFolder,const std::vector<std::string>& vShpFiles,const std::string& szDstFolder)
+{
+	if (vShpFiles.empty()) { return false; }
+
+	for (unsigned int i = 0; i < vShpFiles.size(); ++i)
+	{
+		std::string szSrcShpFile(szSrcFolder);
+		szSrcShpFile += vShpFiles[i];
+
+		std::string szDstShpFile(szDstFolder);
+		szDstShpFile += vShpFiles[i];
+
+		OGRDataSource *pSrcDS = OGRSFDriverRegistrar::Open(szSrcShpFile.c_str());
+		if (pSrcDS == NULL) { continue; }
+		OGRSFDriver *poDriver = pSrcDS->GetDriver();
+
+		if (PathInfo::IsFileExist(szDstShpFile.c_str()) )
+		{
+			std::cerr << "警告信息：文件已经存在，将删除后重建！" << szDstShpFile << std::endl;
+			poDriver->DeleteDataSource(szDstShpFile.c_str());
+		}
+
+		OGRDataSource *pDstDS = poDriver->CopyDataSource(pSrcDS,szDstShpFile.c_str(),NULL);
+		if (pDstDS == NULL) { std::cerr << "Error Copy Shapefile : " << szDstShpFile << std::endl; }
+
+		OGRDataSource::DestroyDataSource(pSrcDS);
+		OGRDataSource::DestroyDataSource(pDstDS);
+	}
+	return true;
+}
+
+
+//------------------------------------------------------------------------------
+bool CopyShapeFile(const std::string& szSrcFile, const std::string& szDstFile)
+{
+	OGRDataSource *pSrcDS = OGRSFDriverRegistrar::Open(szSrcFile.c_str());
+	if (pSrcDS == NULL) { return false; }
+	OGRSFDriver *poDriver = pSrcDS->GetDriver();
+
+	if (PathInfo::IsFileExist(szDstFile.c_str()))
+	{
+		std::cerr << "警告信息：文件已经存在，将删除后重建！" << szDstFile << std::endl;
+		poDriver->DeleteDataSource(szDstFile.c_str());
+	}
+
+	OGRDataSource *pDstDS = poDriver->CopyDataSource(pSrcDS, szDstFile.c_str(), NULL);
+	if (pDstDS == NULL) { std::cerr << "Error Copy Shapefile : " << szDstFile << std::endl; }
+
+	OGRDataSource::DestroyDataSource(pSrcDS);
+	OGRDataSource::DestroyDataSource(pDstDS);
+	return true;
+}
+
+
+//--------------------------------------------------------------------------
+enum FuncType
+{
+	FT_JZ     = 1,          // 居住
+	FT_XSY  = 2,          // 小商业
+	FT_SC    = 3,          // 购物中心/综合市场
+	FT_GC    = 4,         // 工厂
+	FT_GS    = 5,         // 公司
+	FT_GF1  = 61,       // 公共服务一级
+	FT_GF2  = 62,       // 公共服务二级
+	FT_GF3  = 63,       // 公共服务三级
+	FT_JT     = 7          // 交通
+};
+
+//--------------------------------------------------------------------------
+static const double FW_JZ = 0.34;
+static const double FW_XSY = 0.001;
+static const double FW_SC = 1.0;
+static const double FW_GC = 0.06;
+static const double FW_GS = 0.024;
+static const double FW_GF1 = 0.55;
+static const double FW_GF2 = 0.015;
+static const double FW_GF3 = 0.01;
+static const double FW_JT = 1.0;
+
+//--------------------------------------------------------------------------
+class CParameter
+{
+public:
+	CParameter(void);
+	~CParameter(void);
+
+	bool ExportToXMLFile(const char* szFileName);
+	bool ImportFromXMLFile(const char* szFileName);
+	double GetWeight(int type);
+protected:
+	void SetDefaultFunctionWeight();
+	private:
+	std::map<int,double> d_fw;
+};
+
+
+//------------------------------------------------------------------------------
+CParameter::CParameter(void)
+{
+	SetDefaultFunctionWeight();
+}
+
+//------------------------------------------------------------------------------
+CParameter::~CParameter(void)
+{
+}
+
+//------------------------------------------------------------------------------
+void CParameter::SetDefaultFunctionWeight()
+{
+	d_fw.insert(std::make_pair(FT_JZ,FW_JZ));
+	d_fw.insert(std::make_pair(FT_XSY,FW_XSY));
+	d_fw.insert(std::make_pair(FT_SC,FW_SC));
+	d_fw.insert(std::make_pair(FT_GC,FW_GC));
+	d_fw.insert(std::make_pair(FT_GS,FW_GS));
+	d_fw.insert(std::make_pair(FT_GF1,FW_GF1));
+	d_fw.insert(std::make_pair(FT_GF2,FW_GF2));
+	d_fw.insert(std::make_pair(FT_GF3,FW_GF3));
+	d_fw.insert(std::make_pair(FT_JT,FW_JT));
+}
+
+//------------------------------------------------------------------------------
+bool CParameter::ExportToXMLFile(const char* szFileName)
+{
+	int rc;
+	xmlTextWriterPtr writer;
+	std::stringstream ss;
+
+	writer = xmlNewTextWriterFilename(szFileName, 0);
+	if (writer == NULL) {
+		printf("testXmlwriterFilename: Error creating the xml writer\n");
+		return false;
+	}
+
+	rc = xmlTextWriterStartDocument(writer, "1.0", "UTF-8", NULL);
+	assert(rc >= 0);
+
+	rc = xmlTextWriterStartElement(writer, BAD_CAST "Parameter");
+	rc = xmlTextWriterWriteAttribute(writer, BAD_CAST "name", BAD_CAST "Recognition");
+	rc = xmlTextWriterWriteAttribute(writer, BAD_CAST "version", BAD_CAST "1.0");
+	assert(rc >= 0);
+
+	rc = xmlTextWriterStartElement(writer, BAD_CAST "FunctionWeight");
+
+	std::map<int,double>::iterator itr;
+	for (itr = d_fw.begin(); itr != d_fw.end(); ++itr)
+	{
+		rc = xmlTextWriterStartElement(writer, BAD_CAST "Function");
+
+		ss << itr->first;
+		rc = xmlTextWriterWriteAttribute(writer, BAD_CAST "type", BAD_CAST ss.str().c_str());
+		ss.str("");
+
+		ss << itr->second;
+		rc = xmlTextWriterWriteAttribute(writer, BAD_CAST "weight", BAD_CAST ss.str().c_str());
+		ss.str("");
+
+		rc = xmlTextWriterEndElement(writer);
+	}
+
+	rc = xmlTextWriterEndElement(writer); // FunctionWeight node end
+
+	rc = xmlTextWriterEndDocument(writer);
+	assert(rc >= 0);
+
+	xmlFreeTextWriter(writer);
+
+	return true;
+}
+
+//------------------------------------------------------------------------------
+bool CParameter::ImportFromXMLFile(const char* szFileName)
+{
+	d_fw.clear();
+
+	xmlDocPtr doc = NULL;
+	xmlNodePtr curNode = NULL;
+	xmlChar* szKey;
+
+	doc = xmlParseFile(szFileName);
+	if (NULL == doc)
+	{
+		printf("xmlParseFile: Error parse the xml file\n");
+		fflush(stdout);
+		return false;
+	}
+
+	curNode = xmlDocGetRootElement(doc);
+	if (NULL == curNode)
+	{
+		fprintf(stderr,"empty document\n");
+		fflush(stderr);
+		xmlFreeDoc(doc);
+		return false;
+	}
+
+	if (xmlStrcmp(curNode->name, BAD_CAST "Parameter"))
+	{
+		fprintf(stderr,"document of the wrong type, root node != Parameter");
+		fflush(stderr);
+		xmlFreeDoc(doc);
+		return false;
+	}
+
+	if (!xmlHasProp(curNode,BAD_CAST"name"))
+	{
+		fprintf(stderr,"document of the wrong type, root node hasn't the name property");
+		fflush(stderr);
+		xmlFreeDoc(doc);
+		return false;
+	}
+
+	szKey = xmlGetProp(curNode,BAD_CAST "name");
+	if (xmlStrcmp(szKey, BAD_CAST "Recognition"))
+	{
+		fprintf(stderr,"document of the wrong type, root node's property is not Recognition");
+		fflush(stderr);
+		xmlFreeDoc(doc);
+		return false;
+	}
+	xmlFree(szKey);
+
+	xmlXPathContextPtr xpathCtx;
+	xmlXPathObjectPtr result;
+	xmlNodeSetPtr nodeSet;
+
+	xmlChar* xpath;
+	xmlChar *szValue;
+
+	xpathCtx = xmlXPathNewContext(doc);
+
+	xpath = BAD_CAST ("/Parameter/FunctionWeight/Function");
+	result = xmlXPathEvalExpression(xpath, xpathCtx);
+	nodeSet = result->nodesetval;
+	for (int i=0; i < nodeSet->nodeNr; i++) {
+		curNode = nodeSet->nodeTab[i];
+		szKey = xmlGetProp(curNode,BAD_CAST "type");
+		int type = atoi((char *)szKey);
+		szValue = xmlGetProp(curNode,BAD_CAST "weight");
+		double weight = atof((char *)szValue);
+		d_fw.insert(std::make_pair(type,weight));
+		xmlFree(szValue);
+	}
+	xmlXPathFreeObject(result);
+
+	xmlXPathFreeContext(xpathCtx);
+
+	xmlFreeDoc(doc);
+	return true;
+}
+
+double CParameter::GetWeight(int type)
+{
+	std::map<int,double>::iterator pFinder = d_fw.find(type);
+	if (pFinder != d_fw.end())
+	{
+		return pFinder->second;
+	}
+	return 0.0;
+}
+
+
+//--------------------------------------------------------------------------
+enum recognition_enum
+{
+	recognition_segments = 1,
+	recognition_blocks      = 2
+};
+
+//--------------------------------------------------------------------------
+typedef struct tagRecogPara
+{
+	int funcType;
+	std::string funcName;
+	std::vector<std::string> poiFiles;
+} RecogPara;
+
+
+//------------------------------------------------------------------------------
+void Copyright();
+
+//------------------------------------------------------------------------------
+void _initRecogPara(std::vector<RecogPara>& rp);
+
+//------------------------------------------------------------------------------
+bool _contains(OGREnvelope& psExtent,OGRPoint *pPnt);
+
+//------------------------------------------------------------------------------
+void _calcArea(OGRGeometry* pGeom, double* area);
+
+//------------------------------------------------------------------------------
+bool _readPoints(RecogPara& rp,std::string &szShpFolder,std::vector<OGRPoint*>& vPnts);
+
+//------------------------------------------------------------------------------
+bool _appendFunctionTypeField(std::string &szFolder, std::vector<std::string>& vShpFiles);
+
+//------------------------------------------------------------------------------
+bool _appendBlockFunctionField(std::string &szBlockFile);
+
+//--------------------------------------------------------------------------
+bool _getRecognitionType(int argc, _TCHAR* argv[],int &recognition_type);
+
+//--------------------------------------------------------------------------
+bool _getRecognitionSegmentsParameters(int argc, _TCHAR* argv[],std::string &szSegFolder,std::string &szPOIFolder,std::string &szOutFolder);
+
+//--------------------------------------------------------------------------
+bool _getRecognitionBlocksParameters(int argc, _TCHAR* argv[],std::string &szSegFolder,std::string &szBlockFile,std::string &szParaFile,std::string &szOutFolder);
+
+//--------------------------------------------------------------------------
+bool _recognitionOfSegments(std::vector<RecogPara>& rp,std::string &szPOIFolder,std::vector<std::string>& vShpFiles,std::string &szOutFolder);
+
+//--------------------------------------------------------------------------
+bool _recognitionOfBlocks(std::string &szBlockFile,std::string &szOutFolder,std::vector<std::string>& vShpFiles);
+
+//--------------------------------------------------------------------------
+bool _calcFuncTypeOfBlocks(std::string &szBlockFile,CParameter& para);
+
+//--------------------------------------------------------------------------
+int _recognitionForHSEG(int argc, _TCHAR* argv[]);
+
+//--------------------------------------------------------------------------
+int _recognitionForENVI(int argc, _TCHAR* argv[]);
+
+
+//--------------------------------------------------------------------------
+bool _getRecognitionType(int argc, _TCHAR* argv[],int &recognition_type)
+{
+	option_t *optList, *thisOpt;
+	optList = NULL;
+	optList = GetOptList(argc, argv, "t:h:?");
+	recognition_type = 0;
+	bool isHelper = false;
+	while (optList != NULL)
+	{
+		thisOpt = optList;
+		optList = optList->next;
+
+		if ('t' == thisOpt->option)
+		{
+			recognition_type = atoi(thisOpt->argument);
+		}
+		else if ('h' == thisOpt->option || '?' == thisOpt->option)
+		{
+			isHelper = true;
+			break;
+		}
+		free(thisOpt);
+	}
+	if (NULL != optList) { FreeOptList(optList); }
+	if (isHelper || 0 == recognition_type) {
+		Copyright();
+		return false;
+	}
+	return true;
+}
+
+
+//------------------------------------------------------------------------------
+void Copyright()
+{
+	std::cerr << "*******************************************************************" << std::endl;
+	std::cerr << "版权声明                                                                                              " << std::endl;
+	std::cerr << "产品名称：城市功能区识别软件                                                            " << std::endl;
+	std::cerr << "版本：1.0.0                                                                                          " << std::endl;
+	std::cerr << "发布日期：2016年8月3日                                                                   " << std::endl;
+	std::cerr << "版权所有：中科院城市环境研究所                                                                      " << std::endl;
+	std::cerr << "联系方式： 宋金超 songjinchao08@163.com  << std::endl;
+	std::cerr << "1.非经本人授权许可，不得将之用于盈利性的任何用途。                        " << std::endl;
+	std::cerr << "2.为适应实际的计算机应用环境，对其功能、性能、界面，                    " << std::endl;
+	std::cerr << "   可以进行必要的修改，但不得去除版权所有：吝涛、邓富亮                " << std::endl;
+	std::cerr << "   版本：1.0.0的版本标示；未经本人书面授权许可，不得向任               " << std::endl;
+	std::cerr << "   何第三方提供修改后的软件。                                                             " << std::endl;
+	std::cerr << "3.将该软件从原有自然语言文字转换成另一自然语言文字的，                 " << std::endl;
+	std::cerr << "   仍应注明出处，并不得向任何第三方提供修改后的软件。                    " << std::endl;
+	std::cerr << "4.不得有其他侵犯本软件版权之行为。                                                   " << std::endl;
+	std::cerr << "凡有上述侵权行为的个人、法人或其它组织，必须立即停止侵                " << std::endl;
+	std::cerr << "权并对其侵权造成的一切不良后果承担全部责任。对此前，尤其             " << std::endl;
+	std::cerr << "是此后侵犯本版权的行为，本人将依据《著作权法》、                           " << std::endl;
+	std::cerr << "《计算机软件保护条例》等相关法律、法规追究其经济责任和法律责任。" << std::endl;
+	std::cerr << "*******************************************************************" << std::endl;
+	std::cerr << "使用说明                                                                                              " << std::endl;
+	std::cerr << "[命令] recognition.exe                                                                        " << std::endl;
+	std::cerr << "[格式] recognition.exe [命令 参数] [命令 参数] ...                                 " << std::endl;
+	std::cerr << "命令说明:                                                                                              " << std::endl;
+	std::cerr << "-h 打印版权及帮助信息.                                                                         " << std::endl;
+	std::cerr << "-t 1表示分割斑块功能区识别，2表示街区功能识别.                                 " << std::endl;
+	std::cerr << "-s 图像分割输出的shape文件夹路径.                                                      " << std::endl;
+	std::cerr << "-p -t为1表示POI数据文件夹路径；-t为2表示参数文件。                             " << std::endl;
+	std::cerr << "-o 识别结果输出路径.                                                                             " << std::endl;
+	std::cerr << "示例1：recognition.exe -t 1 -s F:\\temp\\level_86 -p F:\\xmpoi -o F:\\recog" << std::endl;
+	std::cerr << "示例2：recognition.exe -t 2 -s F:\\recog -b F:\\block.shp -p F:\\temp\\para.xml -o F:\\temp" << std::endl;
+	std::cerr << "*******************************************************************" << std::endl;
+}
+
+//--------------------------------------------------------------------------
+bool _getRecognitionSegmentsParameters(int argc, _TCHAR* argv[],std::string &szSegFolder,std::string &szPOIFolder,std::string &szOutFolder)
+{
+	szSegFolder = szPOIFolder = szOutFolder = "";
+	option_t *optList, *thisOpt;
+	optList = NULL;
+	optList = GetOptList(argc, argv, "s:p:o:h:?");
+
+	bool isHelper = false;
+	while (optList != NULL)
+	{
+		thisOpt = optList;
+		optList = optList->next;
+
+		if ('s' == thisOpt->option)
+		{
+			szSegFolder = thisOpt->argument;
+		}
+		else if ('p' == thisOpt->option)
+		{
+			szPOIFolder = thisOpt->argument;
+		}
+		else if ('o' == thisOpt->option)
+		{
+			szOutFolder = thisOpt->argument;
+		}
+		free(thisOpt);
+	}
+	if (NULL != optList) { FreeOptList(optList); }
+	if (isHelper || szSegFolder.empty() || szPOIFolder.empty() || szOutFolder.empty()) { return false; }
+
+	if (szSegFolder[szSegFolder.length()-1] != '\\') { szSegFolder += "\\"; }
+	if (szPOIFolder[szPOIFolder.length()-1] != '\\') { szPOIFolder += "\\"; }
+	if (szOutFolder[szOutFolder.length()-1] != '\\') { szOutFolder += "\\"; }
+	return true;
+}
+
+//--------------------------------------------------------------------------
+bool _getRecognitionBlocksParameters(int argc, _TCHAR* argv[],std::string &szSegFolder,std::string &szBlockFile,std::string &szParaFile,std::string &szOutFolder)
+{
+	szSegFolder = szBlockFile = szParaFile = szOutFolder = "";
+	option_t *optList, *thisOpt;
+	optList = NULL;
+	optList = GetOptList(argc, argv, "t:s:b:o:p:h:?");
+
+	bool isHelper = false;
+	while (optList != NULL)
+	{
+		thisOpt = optList;
+		optList = optList->next;
+
+		if ('s' == thisOpt->option)
+		{
+			szSegFolder = thisOpt->argument;
+		}
+		else if ('b' == thisOpt->option)
+		{
+			szBlockFile = thisOpt->argument;
+		}
+		else if ('o' == thisOpt->option)
+		{
+			szOutFolder = thisOpt->argument;
+		}
+		else if ('p' == thisOpt->option)
+		{
+			szParaFile = thisOpt->argument;
+		}
+		free(thisOpt);
+	}
+	if (NULL != optList) { FreeOptList(optList); }
+	if (isHelper || szSegFolder.empty() || szBlockFile.empty() || szParaFile.empty() || szOutFolder.empty()) { return false; }
+
+	if (szSegFolder[szSegFolder.length()-1] != '\\') { szSegFolder += "\\"; }
+	if (szOutFolder[szOutFolder.length()-1] != '\\') { szOutFolder += "\\"; }
+	return true;
+}
+
+//------------------------------------------------------------------------------
+bool _appendFunctionTypeField(std::string &szFolder, std::vector<std::string>& vShpFiles)
+{
+	for (unsigned int i = 0; i < vShpFiles.size(); ++i) {
+		std::string szShpFile = szFolder;
+		szShpFile += vShpFiles[i];
+
+		OGRDataSource *poDS = OGRSFDriverRegistrar::Open(szShpFile.c_str(),TRUE);
+		assert (poDS != NULL);
+
+		OGRLayer *pLyr = poDS->GetLayerByName(PathInfo::getTitle(szShpFile.c_str()));
+		assert (pLyr != NULL);
+
+		OGRFeatureDefn *pDefn = pLyr->GetLayerDefn();
+		int idx = pDefn->GetFieldIndex("Type");
+		if (-1 == idx)
+		{
+			OGRFieldDefn oField("Type", OFTInteger);
+			pLyr->CreateField(&oField);
+		}
+
+		OGRDataSource::DestroyDataSource(poDS);
+	}
+	return true;
+}
+
+//------------------------------------------------------------------------------
+bool _contains(OGREnvelope& psExtent,OGRPoint *pPnt)
+{
+	if (pPnt->getX() < psExtent.MinX || pPnt->getX() > psExtent.MaxX)
+	{
+		return false;
+	}
+
+	if (pPnt->getY() < psExtent.MinY || pPnt->getY() > psExtent.MaxY)
+	{
+		return false;
+	}
+	return true;
+}
+
+//------------------------------------------------------------------------------
+void _calcArea(OGRGeometry* pGeom, double* area)
+{
+	if (NULL == pGeom) { return; }
+	OGRwkbGeometryType type = pGeom->getGeometryType();
+	if (wkbGeometryCollection == type)
+	{
+		OGRGeometryCollection* pColl = (OGRGeometryCollection*)(pGeom);
+		*area += pColl->get_Area();
+	}
+	else if (wkbMultiPolygon == type)
+	{
+		OGRMultiPolygon* pTmp = (OGRMultiPolygon*)pGeom;
+		*area += pTmp->get_Area();
+	}
+	else if (wkbPolygon == type) {
+		OGRPolygon* pTmp = (OGRPolygon*)pGeom;
+		*area += pTmp->get_Area();
+	}
+}
+
+//------------------------------------------------------------------------------
+bool _readPoints(RecogPara& rp,std::string &szShpFolder,std::vector<OGRPoint*>& vPnts)
+{
+	for (unsigned int i = 0; i < rp.poiFiles.size(); ++i)
+	{
+		std::string szPoiFile = szShpFolder + rp.poiFiles[i];
+		if (!PathInfo::IsFileExist(szPoiFile.c_str()) )
+		{
+			std::cerr << "警告信息：POI文件不存在-----" << szPoiFile << std::endl;
+			continue;
+		}
+
+		OGRDataSource *poShpDS = OGRSFDriverRegistrar::Open( szPoiFile.c_str(), TRUE );
+		if( poShpDS == NULL ) {
+			cout << "Open shape file failed." << szPoiFile << std::endl;
+			continue;
+		}
+		OGRLayer *poLayer = poShpDS->GetLayerByName( PathInfo::getTitle(szPoiFile.c_str()) );
+		assert(poLayer != NULL);
+
+		OGRFeature *poFeature;
+		poLayer->ResetReading();
+		while((poFeature = poLayer->GetNextFeature()))
+		{
+			OGRGeometry *pGeometry = poFeature->GetGeometryRef();
+			vPnts.push_back((OGRPoint*)pGeometry->clone());
+			OGRFeature::DestroyFeature(poFeature);
+			poFeature = NULL;
+		}
+		OGRDataSource::DestroyDataSource(poShpDS);
+	}
+	return !(vPnts.empty());
+}
+
+//------------------------------------------------------------------------------
+void _initRecogPara(std::vector<RecogPara>& rp)
+{
+	RecogPara para;
+	//------------------------------------------------------------------------------ 交通
+	para.funcType = FT_JT;
+	para.funcName = "交通";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("飞机场1501.shp"));
+	para.poiFiles.push_back(std::string("火车站1502.shp"));
+
+	rp.push_back(para);
+	//------------------------------------------------------------------------------ 购物中心/综合市场
+	para.funcType = FT_SC;
+	para.funcName = "购物中心/综合市场";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("购物中心综合市场06B.shp"));
+
+	rp.push_back(para);
+	//------------------------------------------------------------------------------公共服务一级
+	para.funcType = FT_GF1;
+	para.funcName = "公共服务一级";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("地区市政府19.shp"));
+	para.poiFiles.push_back(std::string("高等院校1412A.shp"));
+	para.poiFiles.push_back(std::string("综合医院0901.shp"));
+
+	rp.push_back(para);
+	//------------------------------------------------------------------------------居住
+	para.funcType = FT_JZ;
+	para.funcName = "居住";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("商务住宅12A.shp"));
+	para.poiFiles.push_back(std::string("住宅小区12B.shp"));
+
+	rp.push_back(para);
+	//------------------------------------------------------------------------------工业
+	para.funcType = FT_GC;
+	para.funcName = "工业";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("工厂1703.shp"));
+
+	rp.push_back(para);
+	//------------------------------------------------------------------------------公司
+	para.funcType = FT_GS;
+	para.funcName = "公司";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("公司17.shp"));
+
+	rp.push_back(para);
+	//------------------------------------------------------------------------------公共服务二级
+	para.funcType = FT_GF2;
+	para.funcName = "公共服务二级";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("中学1412B.shp"));
+	para.poiFiles.push_back(std::string("公检法机关1305.shp"));
+	para.poiFiles.push_back(std::string("医疗保健服务09A.shp"));
+	para.poiFiles.push_back(std::string("专科医院09B.shp"));
+	para.poiFiles.push_back(std::string("公共服务政府机关及社会团体13.shp"));
+	para.poiFiles.push_back(std::string("风景名胜11.shp"));
+
+	rp.push_back(para);
+	//------------------------------------------------------------------------------公共服务三级
+	para.funcType = FT_GF3;
+	para.funcName = "公共服务三级";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("科教文化服务14.shp"));
+
+	rp.push_back(para);
+	//------------------------------------------------------------------------------小商业
+	para.funcType = FT_XSY;
+	para.funcName = "小商业";
+	para.poiFiles.clear();
+	para.poiFiles.push_back(std::string("餐饮服务05.shp"));
+	para.poiFiles.push_back(std::string("保险公司16.shp"));
+	para.poiFiles.push_back(std::string("购物服务06A.shp"));
+	para.poiFiles.push_back(std::string("动物医疗场所09.shp"));
+	para.poiFiles.push_back(std::string("生活服务07.shp"));
+	para.poiFiles.push_back(std::string("汽车销售02.shp"));
+	para.poiFiles.push_back(std::string("汽车维修03.shp"));
+	para.poiFiles.push_back(std::string("汽车服务01.shp"));
+	para.poiFiles.push_back(std::string("摩托车服务04.shp"));
+	para.poiFiles.push_back(std::string("金融保险机构1600.shp"));
+	para.poiFiles.push_back(std::string("银行1601.shp"));
+	para.poiFiles.push_back(std::string("证券公司1605.shp"));
+	para.poiFiles.push_back(std::string("体育休闲服务08.shp"));
+	para.poiFiles.push_back(std::string("住宿服务10.shp"));
+
+	rp.push_back(para);
+}
+
+//--------------------------------------------------------------------------
+bool _recognitionOfSegments(std::vector<RecogPara>& rp,std::string &szPOIFolder,std::vector<std::string>& vShpFiles,std::string &szOutFolder)
+{
+	for (unsigned int i = 0; i < rp.size(); ++i) {
+		//--------------------------------------------------------------------------
+		RecogPara &para = rp[i];
+		std::cerr << "总计功能区种类为：" << rp.size() << "；当前识别的功能区为第：" << (i+1) << "个，" << para.funcName << std::endl;
+		std::vector<OGRPoint*> vPnts;
+		if (!_readPoints(para,szPOIFolder,vPnts)) { continue; }
+
+		//--------------------------------------------------------------------------
+		for (unsigned int j = 0; j < vShpFiles.size(); ++j)
+		{
+			std::cerr << "总计Shape文件个数为：" << vShpFiles.size() << ", 正在处理第：" << (j+1) << "," << vShpFiles[j] << std::endl;
+			std::string szShpFile = szOutFolder + vShpFiles[j];
+			OGRDataSource *poShpDS = OGRSFDriverRegistrar::Open(szShpFile.c_str(), TRUE);
+			if( poShpDS == NULL ) {
+				std::cerr << "Open shape file failed." << szShpFile << std::endl;
+				continue;
+			}
+			OGRLayer *poLayer = poShpDS->GetLayerByName( PathInfo::getTitle(szShpFile.c_str()) );
+
+			OGREnvelope psExtent;
+			OGRFeature *poFeature;
+			poLayer->ResetReading();
+			while( (poFeature = poLayer->GetNextFeature()) )
+			{
+				int type = poFeature->GetFieldAsInteger("Type");
+				if (0 != type) {
+					OGRFeature::DestroyFeature(poFeature);
+					poFeature = NULL;
+					continue;
+				}
+
+				OGRGeometry *pGeometry = poFeature->GetGeometryRef();
+				pGeometry->getEnvelope(&psExtent);
+				for (unsigned int k = 0; k < vPnts.size(); ++k)
+				{
+					if (!_contains(psExtent,vPnts[k])) { continue; }
+
+					if (pGeometry->Contains(vPnts[k]))
+					{
+						poFeature->SetField("Type",para.funcType);
+						poLayer->SetFeature(poFeature);
+						break;
+					}
+				}
+
+				OGRFeature::DestroyFeature(poFeature);
+				poFeature = NULL;
+			}
+			poLayer->SyncToDisk();
+			OGRDataSource::DestroyDataSource( poShpDS );
+		}
+
+		//--------------------------------------------------------------------------
+		for (unsigned int k = 0; k < vPnts.size(); ++k)
+		{
+			OGRGeometryFactory::destroyGeometry(vPnts[k]);
+		}
+	}
+	return true;
+}
+
+
+//------------------------------------------------------------------------------
+bool _appendBlockFunctionField(std::string &szBlockFile)
+{
+	OGRDataSource *poDS = OGRSFDriverRegistrar::Open(szBlockFile.c_str(),TRUE);
+	if (poDS == NULL) { return false; }
+
+	OGRLayer *pLyr = poDS->GetLayerByName(PathInfo::getTitle(szBlockFile.c_str()));
+	if (pLyr == NULL) { return false; }
+
+	{
+		OGRFieldDefn oField("JT", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("SC", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("JZ", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("XSY", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("GF1", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("GF2", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("GF3", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("GC", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("GS", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	{
+		OGRFieldDefn oField("Type", OFTInteger);
+		pLyr->CreateField(&oField);
+	}
+
+	OGRDataSource::DestroyDataSource(poDS);
+	return true;
+}
+
+//--------------------------------------------------------------------------
+bool _recognitionOfBlocks(std::string &szBlockFile,std::string &szOutFolder,std::vector<std::string>& vShpFiles)
+{
+	for (unsigned int i = 0; i < vShpFiles.size(); ++i)
+	{
+		//--------------------------------------------------------------------------
+		OGRDataSource *poBlkDS = OGRSFDriverRegistrar::Open(szBlockFile.c_str(), TRUE);
+		if( poBlkDS == NULL ) {
+			std::cerr << "Open shape file failed." << szBlockFile << std::endl;
+			return false;
+		}
+		OGRLayer *poBlkLyr = poBlkDS->GetLayerByName( PathInfo::getTitle(szBlockFile.c_str()) );
+		assert(poBlkLyr != NULL);
+
+		//--------------------------------------------------------------------------
+		std::cerr << "总计Shape文件个数为：" << vShpFiles.size() << ", 正在处理第：" << (i+1) << "," << vShpFiles[i] << std::endl;
+		std::string szSegFile = szOutFolder + vShpFiles[i];
+		OGRDataSource *poSegDS = OGRSFDriverRegistrar::Open(szSegFile.c_str(), TRUE);
+		if( poSegDS == NULL ) {
+			std::cerr << "Open shape file failed." << szSegFile << std::endl;
+			continue;
+		}
+		OGRLayer *poSegLyr = poSegDS->GetLayerByName( PathInfo::getTitle(szSegFile.c_str()) );
+		assert(poSegLyr != NULL);
+
+		//--------------------------------------------------------------------------
+		OGRFeature *poSegFtr;
+		poSegLyr->ResetReading();
+		while( (poSegFtr = poSegLyr->GetNextFeature()) )
+		{
+			int segFuncType = poSegFtr->GetFieldAsInteger("Type");
+			if (0 == segFuncType) {
+				OGRFeature::DestroyFeature(poSegFtr);
+				poSegFtr = NULL;
+				continue;
+			}
+
+			OGRGeometry *pSegPoly = poSegFtr->GetGeometryRef();
+			pSegPoly->flattenTo2D();
+			double segPolyArea = 0.0;
+			_calcArea(pSegPoly, &segPolyArea);
+
+			OGREnvelope pEnv1, pEnv2;
+			pSegPoly->getEnvelope(&pEnv1);
+
+			//--------------------------------------------------------------------------
+			OGRFeature *poBlkFtr;
+			poBlkLyr->ResetReading();
+			while ( (poBlkFtr = poBlkLyr->GetNextFeature()) )
+			{
+				int tagJT = poBlkFtr->GetFieldAsInteger("JT");
+				int tagSC = poBlkFtr->GetFieldAsInteger("SC");
+				if (tagJT == FT_JT || tagSC == FT_SC) {
+					OGRFeature::DestroyFeature(poBlkFtr);
+					poBlkFtr = NULL;
+					continue;
+				}
+
+				OGRBoolean isIntersect = FALSE;
+				OGRGeometry *pBlkPoly = poBlkFtr->GetGeometryRef();
+				pBlkPoly->flattenTo2D();
+				pBlkPoly->getEnvelope(&pEnv2);
+				isIntersect = pEnv1.Intersects(pEnv2);
+
+				if (!isIntersect) {
+					OGRFeature::DestroyFeature(poBlkFtr);
+					poBlkFtr = NULL;
+					continue;
+				}
+
+				// 进一步判断是否为有效的相交
+				OGRGeometry* pIGeom = pSegPoly->Intersection(pBlkPoly);
+				OGRBoolean isValidIntersect = FALSE;
+
+				if (pIGeom != NULL)
+				{
+					pIGeom->flattenTo2D();
+					double intPolyArea = 0.0;
+					_calcArea(pIGeom, &intPolyArea);
+
+					if (segPolyArea > 0.0) {
+						double ratio = intPolyArea/segPolyArea;
+						if (ratio >= 0.01) { isValidIntersect = TRUE; }
+					}
+					OGRGeometryFactory::destroyGeometry(pIGeom);
+				}
+
+				if (!isValidIntersect) {
+					OGRFeature::DestroyFeature(poBlkFtr);
+					poBlkFtr = NULL;
+					continue;
+				}
+
+				//--------------------------------------------------------------------------
+				switch (segFuncType)
+				{
+				case FT_JZ: {
+					int count = poBlkFtr->GetFieldAsInteger("JZ");
+					count += 1;
+					poBlkFtr->SetField("JZ",count);
+							}
+							break;
+				case FT_XSY: {
+					int count = poBlkFtr->GetFieldAsInteger("XSY");
+					count += 1;
+					poBlkFtr->SetField("XSY",count);
+							 }
+							 break;
+				case FT_SC: {
+					poBlkFtr->SetField("SC",FT_SC);
+							}
+							break;
+				case FT_GC: {
+					int count = poBlkFtr->GetFieldAsInteger("GC");
+					count += 1;
+					poBlkFtr->SetField("GC",count);
+							}
+							break;
+				case FT_GS: {
+					int count = poBlkFtr->GetFieldAsInteger("GS");
+					count += 1;
+					poBlkFtr->SetField("GS",count);
+							}
+							break;
+				case FT_GF1: {
+					int count = poBlkFtr->GetFieldAsInteger("GF1");
+					count += 1;
+					poBlkFtr->SetField("GF1",count);
+							 }
+							 break;
+				case FT_GF2: {
+					int count = poBlkFtr->GetFieldAsInteger("GF2");
+					count += 1;
+					poBlkFtr->SetField("GF2",count);
+							 }
+							 break;
+				case FT_GF3: {
+					int count = poBlkFtr->GetFieldAsInteger("GF3");
+					count += 1;
+					poBlkFtr->SetField("GF3",count);
+							 }
+							 break;
+				case FT_JT: {
+					poBlkFtr->SetField("JT",FT_JT);
+							}
+							break;
+				}
+				poBlkLyr->SetFeature(poBlkFtr);
+				OGRFeature::DestroyFeature(poBlkFtr);
+				poBlkFtr = NULL;
+			}
+			OGRFeature::DestroyFeature(poSegFtr);
+			poSegFtr = NULL;
+		}
+		poBlkLyr->SyncToDisk();
+		OGRDataSource::DestroyDataSource( poBlkDS );
+		OGRDataSource::DestroyDataSource( poSegDS );
+	}
+	return true;
+}
+
+//--------------------------------------------------------------------------
+bool _calcFuncTypeOfBlocks(std::string &szBlockFile,CParameter& para)
+{
+	//--------------------------------------------------------------------------
+	std::map<int,double> mTypeValues;
+	mTypeValues.insert(std::make_pair(FT_XSY,0.0));
+	mTypeValues.insert(std::make_pair(FT_JZ,0.0));
+	mTypeValues.insert(std::make_pair(FT_GC,0.0));
+	mTypeValues.insert(std::make_pair(FT_GS,0.0));
+	mTypeValues.insert(std::make_pair(FT_GF1,0.0));
+	mTypeValues.insert(std::make_pair(FT_GF2,0.0));
+	mTypeValues.insert(std::make_pair(FT_GF3,0.0));
+
+	//--------------------------------------------------------------------------
+	OGRDataSource *poShpDS = OGRSFDriverRegistrar::Open(szBlockFile.c_str(), TRUE);
+	if( poShpDS == NULL ) {
+		std::cerr << "Open shape file failed." << szBlockFile << std::endl;
+		return false;
+	}
+	OGRLayer *poLayer = poShpDS->GetLayerByName( PathInfo::getTitle(szBlockFile.c_str()) );
+	assert(poLayer != NULL);
+
+	OGRFeature *poFeature;
+	poLayer->ResetReading();
+	while ( (poFeature = poLayer->GetNextFeature()) )
+	{
+		int type = poFeature->GetFieldAsInteger("Type");
+		if (type != 0) {
+			OGRFeature::DestroyFeature(poFeature);
+			poFeature = NULL;
+			continue;
+		}
+
+		int tagJT = poFeature->GetFieldAsInteger("JT");
+		if (tagJT == FT_JT) {
+			poFeature->SetField("Type",FT_JT);
+			poLayer->SetFeature(poFeature);
+			OGRFeature::DestroyFeature(poFeature);
+			poFeature = NULL;
+			continue;
+		}
+
+		int tagSC = poFeature->GetFieldAsInteger("SC");
+		if (tagSC == FT_SC) {
+			poFeature->SetField("Type",FT_SC);
+			poLayer->SetFeature(poFeature);
+			OGRFeature::DestroyFeature(poFeature);
+			poFeature = NULL;
+			continue;
+		}
+
+		int count;
+		double weight;
+		count = poFeature->GetFieldAsInteger("XSY");
+		weight = para.GetWeight(FT_XSY);
+		if (weight > 0.0) {
+			mTypeValues[FT_XSY] = weight*count;
+		}
+
+		count = poFeature->GetFieldAsInteger("GC");
+		weight = para.GetWeight(FT_GC);
+		if (weight > 0.0) {
+			mTypeValues[FT_GC] = weight*count;
+		}
+
+		count = poFeature->GetFieldAsInteger("GS");
+		weight = para.GetWeight(FT_GS);
+		if (weight > 0.0) {
+			mTypeValues[FT_GS] = weight*count;
+		}
+
+		count = poFeature->GetFieldAsInteger("GF1");
+		weight = para.GetWeight(FT_GF1);
+		if (weight > 0.0) {
+			mTypeValues[FT_GF1] = weight*count;
+		}
+
+		count = poFeature->GetFieldAsInteger("GF2");
+		weight = para.GetWeight(FT_GF2);
+		if (weight > 0.0) {
+			mTypeValues[FT_GF2] = weight*count;
+		}
+
+		count = poFeature->GetFieldAsInteger("GF3");
+		weight = para.GetWeight(FT_GF3);
+		if (weight > 0.0) {
+			mTypeValues[FT_GF3] = weight*count;
+		}
+
+		count = poFeature->GetFieldAsInteger("JZ");
+		weight = para.GetWeight(FT_JZ);
+		if (weight > 0.0) {
+			mTypeValues[FT_JZ] = weight*count;
+		}
+
+		double maxVal = -1.0;
+		for (std::map<int,double>::iterator itr = mTypeValues.begin(); itr != mTypeValues.end(); ++itr)
+		{
+			if (itr->second > maxVal)
+			{
+				maxVal = itr->second;
+				type = itr->first;
+			}
+		}
+		if (maxVal > 0.0) {
+			poFeature->SetField("Type",type);
+			poLayer->SetFeature(poFeature);
+		}
+		OGRFeature::DestroyFeature(poFeature);
+		poFeature = NULL;
+	}
+	poLayer->SyncToDisk();
+	OGRDataSource::DestroyDataSource(poShpDS);
+	return true;
+}
+
+//--------------------------------------------------------------------------
+int _recognitionForHSEG(int argc, _TCHAR* argv[])
+{
+	bool bReslt = false;
+	int recognition_type;
+	bReslt = _getRecognitionType(argc, argv, recognition_type);
+	if (!bReslt) { return EXIT_FAILURE; }
+
+	//--------------------------------------------------------------------------
+	if (recognition_segments == recognition_type)
+	{
+		std::string szSegFolder, szPOIFolder, szOutFolder;
+		bReslt = _getRecognitionSegmentsParameters(argc, argv, szSegFolder, szPOIFolder, szOutFolder);
+		if (!bReslt) { return EXIT_FAILURE; }
+
+		if (szSegFolder == szOutFolder) {
+			std::cerr << "错误信息 : 处理结果输出目录不能与输入的分割结果目录相同，请重新指定处理结果输出目录！" << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		if (!PathInfo::IsFileExist(szOutFolder.c_str())) {
+			std::cerr << "错误信息 : 统计结果输出目录不存在，请重新指定！" << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		//------------------------------------------------------------------------------
+		HSegMeta meta;
+		if (!_readMetaFile(szSegFolder, meta)) {
+			std::cerr << "错误信息：读取分割结果信息文件失败！" << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		//------------------------------------------------------------------------------
+		std::cerr << "正在拷贝数据，请耐心等待...." << std::endl;
+		CopyShapeFile(szSegFolder, meta.vShpFiles, szOutFolder);
+
+		std::string szSrcMetaFile = szSegFolder;
+		szSrcMetaFile += std::string("meta.xml");
+		std::string szDstMetaFile = szOutFolder;
+		szDstMetaFile += std::string("meta.xml");
+		CopyFile(szSrcMetaFile.c_str(), szDstMetaFile.c_str(), FALSE);
+
+		_appendFunctionTypeField(szOutFolder, meta.vShpFiles);
+
+		std::vector<RecogPara> rp;
+		_initRecogPara(rp);
+
+		//------------------------------------------------------------------------------
+		std::cerr << "正在进行分割斑块功能区识别，请耐心等待...." << std::endl;
+		_recognitionOfSegments(rp, szPOIFolder, meta.vShpFiles, szOutFolder);
+		return EXIT_SUCCESS;
+
+		//--------------------------------------------------------------------------
+	}
+	else if (recognition_blocks == recognition_type)
+	{
+		std::string szSegFolder, szBlockFile, szParaFile, szOutFolder;
+		bool bReslt = _getRecognitionBlocksParameters(argc, argv, szSegFolder, szBlockFile, szParaFile, szOutFolder);
+		if (!bReslt) { return EXIT_FAILURE; }
+
+		if (!PathInfo::IsFileExist(szOutFolder.c_str())) {
+			std::cerr << "错误信息 : 统计结果输出目录不存在，请重新指定！" << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		CParameter para;
+		if (!para.ImportFromXMLFile(szParaFile.c_str())) { return EXIT_FAILURE; }
+
+		//------------------------------------------------------------------------------
+		std::string szDstBlockFile = szOutFolder;
+		szDstBlockFile += std::string(PathInfo::getName(szBlockFile.c_str()));
+		if (!PathInfo::IsFileExist(szDstBlockFile.c_str())) {
+			CopyShapeFile(szBlockFile, szDstBlockFile);
+			_appendBlockFunctionField(szDstBlockFile);
+		}
+
+		//------------------------------------------------------------------------------
+		HSegMeta meta;
+		if (!_readMetaFile(szSegFolder, meta)) {
+			std::cerr << "错误信息：读取分割结果信息文件失败！" << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		//------------------------------------------------------------------------------
+		std::cerr << "正在进行大街区功能区识别，请耐心等待...." << std::endl;
+		_recognitionOfBlocks(szDstBlockFile, szSegFolder, meta.vShpFiles);
+		std::cerr << "正在计算大街区功能区类型，请耐心等待...." << std::endl;
+		_calcFuncTypeOfBlocks(szDstBlockFile, para);
+		return EXIT_SUCCESS;
+	}
+	return EXIT_FAILURE;
+}
+
+//--------------------------------------------------------------------------
+int _recognitionForENVI(int argc, _TCHAR* argv[])
+{
+	bool bReslt = false;
+	int recognition_type;
+	bReslt = _getRecognitionType(argc, argv, recognition_type);
+	if (!bReslt) { return EXIT_FAILURE; }
+
+	//--------------------------------------------------------------------------
+	if (recognition_segments == recognition_type)
+	{
+		std::string szSegFolder, szPOIFolder, szOutFolder;
+		bReslt = _getRecognitionSegmentsParameters(argc, argv, szSegFolder, szPOIFolder, szOutFolder);
+		if (!bReslt) { return EXIT_FAILURE; }
+
+		if (szSegFolder == szOutFolder) {
+			std::cerr << "错误信息 : 处理结果输出目录不能与输入的分割结果目录相同，请重新指定处理结果输出目录！" << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		if (!PathInfo::IsFileExist(szOutFolder.c_str())) {
+			std::cerr << "错误信息 : 统计结果输出目录不存在，请重新指定！" << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		//------------------------------------------------------------------------------
+		std::vector<std::string> vShpFiles;
+		getFolderShapeFile(szSegFolder, vShpFiles);
+		if (vShpFiles.empty())
+		{
+			return EXIT_FAILURE;
+		}
+
+		//------------------------------------------------------------------------------
+		std::cerr << "正在拷贝数据，请耐心等待...." << std::endl;
+		CopyShapeFile(szSegFolder, vShpFiles, szOutFolder);
+
+		_appendFunctionTypeField(szOutFolder, vShpFiles);
+
+		std::vector<RecogPara> rp;
+		_initRecogPara(rp);
+
+		//------------------------------------------------------------------------------
+		std::cerr << "正在进行分割斑块功能区识别，请耐心等待...." << std::endl;
+		_recognitionOfSegments(rp, szPOIFolder, vShpFiles, szOutFolder);
+		return EXIT_SUCCESS;
+	}
+	else if (recognition_blocks == recognition_type)
+	{
+		std::string szSegFolder, szBlockFile, szParaFile, szOutFolder;
+		bool bReslt = _getRecognitionBlocksParameters(argc, argv, szSegFolder, szBlockFile, szParaFile, szOutFolder);
+		if (!bReslt) { return EXIT_FAILURE; }
+
+		if (!PathInfo::IsFileExist(szOutFolder.c_str())) {
+			std::cerr << "错误信息 : 统计结果输出目录不存在，请重新指定！" << std::endl;
+			return EXIT_FAILURE;
+		}
+
+		CParameter para;
+		if (!para.ImportFromXMLFile(szParaFile.c_str())) { return EXIT_FAILURE; }
+
+		//------------------------------------------------------------------------------
+		std::string szDstBlockFile = szOutFolder;
+		szDstBlockFile += std::string(PathInfo::getName(szBlockFile.c_str()));
+		if (!PathInfo::IsFileExist(szDstBlockFile.c_str())) {
+			CopyShapeFile(szBlockFile, szDstBlockFile);
+			_appendBlockFunctionField(szDstBlockFile);
+		}
+
+		//------------------------------------------------------------------------------
+		std::vector<std::string> vShpFiles;
+		getFolderShapeFile(szSegFolder, vShpFiles);
+		if (vShpFiles.empty())
+		{
+			return EXIT_FAILURE;
+		}
+
+		//------------------------------------------------------------------------------
+		std::cerr << "正在进行大街区功能区识别，请耐心等待...." << std::endl;
+		_recognitionOfBlocks(szDstBlockFile, szSegFolder, vShpFiles);
+		std::cerr << "正在计算大街区功能区类型，请耐心等待...." << std::endl;
+		_calcFuncTypeOfBlocks(szDstBlockFile, para);
+		return EXIT_SUCCESS;
+	}
+	return EXIT_FAILURE;
+}
+
+//---------------------------------------------------------------------------
+typedef struct tagHSegMeta {
+	int nImgXSize;
+	int nImgYSize;
+	std::vector<std::string> vSegFiles;
+	std::vector<std::string> vShpFiles;
+	std::vector<int> vRegCount;
+
+	void Zero() {
+		nImgXSize = nImgYSize = 0;
+		vSegFiles.clear();
+		vShpFiles.clear();
+		vRegCount.clear();
+	}
+} HSegMeta;
+
+
+bool _readMetaFile(const std::string& szSegFolder, HSegMeta &meta);
+
+
+//------------------------------------------------------------------------------
+bool _readMetaFile(const std::string& szSegFolder, HSegMeta &meta)
+{
+	meta.Zero();
+
+	xmlDocPtr doc = NULL;
+	xmlNodePtr curNode = NULL;
+
+	std::string szMetaFile(szSegFolder);
+	if (szMetaFile[szMetaFile.length()-1] != '\\') { szMetaFile += "\\"; }
+	szMetaFile += "meta.xml";
+	doc = xmlParseFile(szMetaFile.c_str());
+	if (NULL == doc)
+	{
+		std::cerr << "xmlParseFile: Error parse the xml file :" << szMetaFile << std::endl;
+		return false;
+	}
+
+	curNode = xmlDocGetRootElement(doc);
+	if (NULL == curNode)
+	{
+		std::cerr << "empty document\n" << std::endl;
+		xmlFreeDoc(doc);
+		return false;
+	}
+
+	if (xmlStrcmp(curNode->name, BAD_CAST "HSEG_META"))
+	{
+		std::cerr << "document of the wrong type, root node != HSEG_META" << std::endl;
+		xmlFreeDoc(doc);
+		return false;
+	}
+
+	xmlXPathContextPtr xpathCtx;
+	xmlXPathObjectPtr result;
+	xmlNodeSetPtr nodeSet;
+
+	xmlChar* xpath;
+	xmlChar *szValue;
+
+	xpathCtx = xmlXPathNewContext(doc);
+
+	//------------------------------------------------------------------------------
+	xpath = BAD_CAST ("/HSEG_META/ImgInfo");
+	result = xmlXPathEvalExpression(xpath, xpathCtx);
+	nodeSet = result->nodesetval;
+	curNode = nodeSet->nodeTab[0];
+	szValue = xmlGetProp(curNode,(const xmlChar *)"XSize");
+	meta.nImgXSize = atoi((char *)szValue);
+	xmlFree(szValue);
+
+	szValue = xmlGetProp(curNode,(const xmlChar *)"YSize");
+	meta.nImgYSize = atoi((char *)szValue);
+	xmlFree(szValue);
+	xmlXPathFreeObject(result);
+
+	std::string szFileName;
+
+	//------------------------------------------------------------------------------
+	xpath = BAD_CAST ("/HSEG_META/MacroBlockLevel/MacroBlock");
+	result = xmlXPathEvalExpression(xpath, xpathCtx);
+	nodeSet = result->nodesetval;
+	for (int i=0; i < nodeSet->nodeNr; i++) {
+		curNode = nodeSet->nodeTab[i];
+
+		szValue = xmlGetProp(curNode,(const xmlChar *)"ShpFile");
+		szFileName = std::string((char*)szValue);
+		xmlFree(szValue);
+		meta.vShpFiles.push_back(szFileName);
+
+		szValue = xmlGetProp(curNode,(const xmlChar *)"SegFile");
+		szFileName = std::string((char*)szValue);
+		xmlFree(szValue);
+		meta.vSegFiles.push_back(szFileName);
+
+		szValue = xmlGetProp(curNode,(const xmlChar *)"RegCount");
+		int nCount = atoi((char*)(szValue));
+		xmlFree(szValue);
+		meta.vRegCount.push_back(nCount);
+	}
+	xmlXPathFreeObject(result);
+
+	xmlXPathFreeContext(xpathCtx);
+
+	xmlFreeDoc(doc);
+	return true;
+}
